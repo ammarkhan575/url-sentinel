@@ -48,7 +48,6 @@ func (p *Pool) Run(ctx context.Context, urls []string) []Result {
 	}
 	// send jobs in a separate goroutine so we can simultaneously collect results
 	go func() {
-		// ensure jobs channel is closed once we've enqueued all URLs or context cancelled
 		defer close(jobs)
 		for _, url := range urls {
 			select {
@@ -58,20 +57,28 @@ func (p *Pool) Run(ctx context.Context, urls []string) []Result {
 				// job sent successfully - continue to next URL
 			}
 		}
-		close(jobs); // CRITICAL: closing jobs causes worker for-range loops to exit
 	}()
 
-	// close results when all workers have finished
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	// collect results until results channel is closed
+	// Collect all results.
+	// We know we'll receive exactly len(urls) results or stop if context is cancelled.
 	gathered := make([]Result, 0, len(urls))
-	for r := range results {
-		gathered = append(gathered, r)
+	for {
+		select {
+		case <-ctx.Done():
+			// context cancelled - stop waiting and return what we've collected
+			wg.Wait() // wait for workers to finish cleanup
+			return gathered
+		case r, ok := <-results:
+			if !ok {
+				// results channel closed - shouldn't happen before we get all results
+				break
+			}
+			gathered = append(gathered, r)
+			if len(gathered) == len(urls) {
+				// received all results - we're done
+				wg.Wait() // wait for workers to finish
+				return gathered
+			}
+		}
 	}
-
-	return gathered
 }
